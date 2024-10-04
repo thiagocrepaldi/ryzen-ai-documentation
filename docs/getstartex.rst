@@ -44,7 +44,7 @@ The following are the steps and the required files to run the example:
      - The ResNet model trained using CIFAR-10 is provided in .pt format.
    * - Quantization 
      - ``resnet_quantize.py``
-     - Convert the model to the NPU-deployable model by performing Post-Training Quantization flow using VitisAI ONNX Quantization.
+     - Convert the model to the NPU-deployable model by performing Post-Training Quantization flow using Quark ONNX Quantization.
    * - Deployment - Python
      - ``predict.py``
      -  Run the Quantized model using the ONNX Runtime code. We demonstrate running the model on both CPU and NPU. 
@@ -77,27 +77,26 @@ Step 1: Install Packages
 Step 2: Prepare dataset and ONNX model
 **************************************
 
-In this example, we utilize a custom ResNet model finetuned using the CIFAR-10 dataset
+In this example, we utilize a custom ResNet model fine tuned using the CIFAR-10 dataset
 
 The ``prepare_model_data.py`` script downloads the CIFAR-10 dataset in pickle format (for python) and binary format (for C++). This dataset will be used in the subsequent steps for quantization and inference. The script also exports the provided PyTorch model into ONNX format. The following snippet from the script shows how the ONNX model is exported:
 
 .. code-block:: 
 
+    from quark.torch import ModelExporter
+    from quark.torch.export.config.config import ExporterConfig, OnnxExporterConfig
+
     dummy_inputs = torch.randn(1, 3, 32, 32)
     input_names = ['input']
     output_names = ['output']
-    dynamic_axes = {'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
     tmp_model_path = str(models_dir / "resnet_trained_for_cifar10.onnx")
-    torch.onnx.export(
-            model,
-            dummy_inputs,
-            tmp_model_path,
-            export_params=True,
-            opset_version=13,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-        )
+    config = ExporterConfig(json_export_config=OnnxExporterConfig())
+    exporter = ModelExporter(config=config, export_dir=tmp_model_path)
+    exporter.export_onnx_model(model=model,
+                               input_args=dummy_inputs,
+                               opset_version=13,
+                               input_names=input_names,
+                               output_names=output_names,)
 
 Note the following settings for the onnx conversion:
 
@@ -111,7 +110,7 @@ Run the following command to prepare the dataset and export the ONNX model:
    python prepare_model_data.py 
 
 * The downloaded CIFAR-10 dataset is saved in the current directory at the following location: ``data/*``.
-* The ONNX model is generated at models/resnet_trained_for_cifar10.onnx
+* The ONNX model is generated at models/resnet_trained_for_cifar10.onnx/quark_model.onnx
 
 |
 |
@@ -120,44 +119,32 @@ Run the following command to prepare the dataset and export the ONNX model:
 Step 3: Quantize the Model
 **************************
 
-Quantizing AI models from floating-point to 8-bit integers reduces computational power and the memory footprint required for inference. This example utilizes the Vitis AI ONNX quantizer workflow. Quantization tool takes the pre-trained float32 model from the previous step (``resnet_trained_for_cifar10.onnx``) and produces a quantized model.
+Quantizing AI models from floating-point to 8-bit integers reduces computational power and the memory footprint required for inference. This example utilizes the Quark ONNX quantizer workflow. Quantization tool takes the pre-trained float32 model from the previous step (``resnet_trained_for_cifar10.onnx``) and produces a quantized model.
 
 .. code-block::
 
    python resnet_quantize.py
 
-This generates a quantized model using QDQ quant format and UInt8 activation type and Int8 weight type. After the completion of the run, the quantized ONNX model ``resnet.qdq.U8S8.onnx`` is saved to models/resnet.qdq.U8S8.onnx. 
+This generates a quantized model using QDQ quant format and UInt8 activation type and Int8 weight type. After the completion of the run, the quantized ONNX model ``resnet.qdq.U8S8.onnx`` is saved to models/resnet_trained_for_cifar10.onnx/resnet.qdq.U8S8.onnx. 
 
-The :file:`resnet_quantize.py` file has ``quantize_static`` function that applies static quantization to the model. 
+The :file:`resnet_quantize.py` file has ``quantize_model`` function that applies static quantization to the model. 
 
 .. code-block::
 
-   from onnxruntime.quantization import QuantFormat, QuantType
-   import vai_q_onnx
+   from quark.onnx.quantization.config import (Config, get_default_config)
+   from quark.onnx import ModelQuantizer
 
-   vai_q_onnx.quantize_static(
-        input_model_path,
-        output_model_path,
-        dr,
-        quant_format=vai_q_onnx.QuantFormat.QDQ,
-        calibrate_method=vai_q_onnx.PowerOfTwoMethod.MinMSE,
-        activation_type=vai_q_onnx.QuantType.QUInt8,
-        weight_type=vai_q_onnx.QuantType.QInt8,
-        enable_dpu=True, 
-        extra_options={'ActivationSymmetric': True} 
-    )
+   quant_config = get_default_config("XINT8")
+   config = Config(global_quant_config=quant_config)
+   quantizer = ModelQuantizer(config)
+   quantizer.quantize_model(input_model_path, output_model_path, dr)
 
 The parameters of this function are:
 
 * **input_model_path**: (String) The file path of the model to be quantized.
 * **output_model_path**: (String) The file path where the quantized model is saved.
 * **dr**: (Object or None) Calibration data reader that enumerates the calibration data and producing inputs for the original model. In this example, CIFAR10 dataset is used for calibration during the quantization process.
-* **quant_format**: (String) Specifies the quantization format of the model. In this example we have used the QDQ quant format.
-* **calibrate_method**: (String) In this example this parameter is set to ``vai_q_onnx.PowerOfTwoMethod.MinMSE`` to apply power-of-2 scale quantization. 
-* **activation_type**: (String) Data type of activation tensors after quantization. In this example, it's set to QInt8 (Quantized Integer 8).
-* **weight_type**: (String) Data type of weight tensors after quantization. In this example, it's set to QInt8 (Quantized Integer 8).
-* **enable_dpu**: (Boolean) Determines whether to generate a quantized model that is suitable for the NPU/DPU. If set to True, the quantization process will create a model that is optimized for NPU/DPU computations.
-* **extra_options**: (Dict or None) Dictionary of additional options that can be passed to the quantization process. In this example, ``ActivationSymmetric`` is set to True. It means calibration data for activations is symmetrized. 
+* **config**: Specifies the quantization config. In this example we have used the XINT8, which is optimized for NPU devices. XINT8 uses QDQ format, assymetric unsigned int8 activations and symmetric int8 weights calibrated using power of two and MinMSE.
 
 |
 |
@@ -197,11 +184,11 @@ Typical output
 
         Image 0: Actual Label cat, Predicted Label cat
         Image 1: Actual Label ship, Predicted Label ship
-        Image 2: Actual Label ship, Predicted Label airplane
+        Image 2: Actual Label ship, Predicted Label ship
         Image 3: Actual Label airplane, Predicted Label airplane
         Image 4: Actual Label frog, Predicted Label frog
         Image 5: Actual Label frog, Predicted Label frog
-        Image 6: Actual Label automobile, Predicted Label automobile
+        Image 6: Actual Label automobile, Predicted Label truck
         Image 7: Actual Label frog, Predicted Label frog
         Image 8: Actual Label cat, Predicted Label cat
         Image 9: Actual Label automobile, Predicted Label automobile
@@ -262,12 +249,12 @@ Typical output
     Image 1: Actual Label ship, Predicted Label ship
     Image 2: Actual Label ship, Predicted Label ship
     Image 3: Actual Label airplane, Predicted Label airplane
-    Image 4: Actual Label frog, Predicted Label frog 
-    Image 5: Actual Label frog, Predicted Label frog 
+    Image 4: Actual Label frog, Predicted Label frog
+    Image 5: Actual Label frog, Predicted Label frog
     Image 6: Actual Label automobile, Predicted Label truck
     Image 7: Actual Label frog, Predicted Label frog
     Image 8: Actual Label cat, Predicted Label cat
-    Image 9: Actual Label automobile, Predicted Label automobile 
+    Image 9: Actual Label automobile, Predicted Label automobile
    
 
 .. _dep-cpp:
@@ -343,13 +330,13 @@ To run the model on the CPU, use the following command:
 
 .. code-block:: bash 
 
-   resnet_cifar.exe models\resnet.qdq.U8S8.onnx cpu None
+   resnet_cifar.exe models\resnet_trained_for_cifar10.onnx\resnet.qdq.U8S8.onnx cpu None
 
 Typical output: 
 
 .. code-block:: bash 
 
-   model name:models\resnet.qdq.U8S8.onnx
+   model name:models\resnet_trained_for_cifar10.onnx\resnet.qdq.U8S8.onnx
    ep:cpu
    Input Node Name/Shape (1):
            input : -1x3x32x32
@@ -405,7 +392,7 @@ To run the model on the NPU, we will pass the npu flag and the vaip_config.json 
 
 .. code-block:: bash 
 
-   resnet_cifar.exe models\resnet.qdq.U8S8.onnx npu vaip_config.json
+   resnet_cifar.exe models\resnet_trained_for_cifar10.onnx\resnet.qdq.U8S8.onnx npu vaip_config.json
 
 Typical output: 
 
